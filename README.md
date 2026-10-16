@@ -1,6 +1,6 @@
 # SAM Barbing Hub
 
-Manager and worker portal for shop records, staff approvals, and daily analytics.
+An accounting dashboard for a salon, with manager and worker portals for shop records, staff approvals, and daily analytics.
 
 ## Requirements
 
