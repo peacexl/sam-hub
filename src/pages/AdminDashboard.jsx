@@ -57,13 +57,15 @@ const belongsToPoint = (record, range, point) => {
   return date.getFullYear() === new Date().getFullYear() && String(date.getMonth()) === point.key;
 };
 
-const AdminDashboard = ({ admin, workers, records, onUpdateWorker, onAddRecord, onChangeEmail, onChangePassword, onReactToRecord, onLogout }) => {
+const AdminDashboard = ({ admin, workers, records, onUpdateWorker, onAddExpenditure, onChangeEmail, onChangePassword, onGetSessions, onRevokeSession, onReactToRecord, onLogout }) => {
   const [activePage, setActivePage] = useState("Overview");
   const [range, setRange] = useState("week");
   const [selectedWorker, setSelectedWorker] = useState(null);
-  const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [expenseTitle, setExpenseTitle] = useState("");
   const [expenseAmount, setExpenseAmount] = useState("");
+  const [expenseMessage, setExpenseMessage] = useState("");
+  const [expenseSuccess, setExpenseSuccess] = useState("");
+  const [savingExpense, setSavingExpense] = useState(false);
   const [actionMessage, setActionMessage] = useState("");
 
   const todayRecords = records.filter((record) => sameDay(toDate(record), new Date()));
@@ -87,15 +89,24 @@ const AdminDashboard = ({ admin, workers, records, onUpdateWorker, onAddRecord, 
 
   const addExpense = async (event) => {
     event.preventDefault();
-    if (!expenseTitle.trim() || Number(expenseAmount) <= 0) return;
+    const amount = Number(expenseAmount);
+    if (expenseTitle.trim().length < 2 || expenseTitle.trim().length > 120 || !Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000) {
+      setExpenseMessage("Enter a description between 2 and 120 characters and a valid amount.");
+      setExpenseSuccess("");
+      return;
+    }
+    setSavingExpense(true);
+    setExpenseMessage("");
+    setExpenseSuccess("");
     try {
-      await onAddRecord({ service: expenseTitle.trim(), amount: Number(expenseAmount), type: "expense" });
+      await onAddExpenditure({ description: expenseTitle.trim(), amount });
       setExpenseTitle("");
       setExpenseAmount("");
-      setShowExpenseForm(false);
-      setActionMessage("");
+      setExpenseSuccess("Expenditure saved successfully.");
     } catch (error) {
-      setActionMessage(error.message || "Unable to save the expense.");
+      setExpenseMessage(error.message || "Unable to save the expenditure.");
+    } finally {
+      setSavingExpense(false);
     }
   };
 
@@ -120,6 +131,7 @@ const AdminDashboard = ({ admin, workers, records, onUpdateWorker, onAddRecord, 
   const navItems = [
     { label: "Overview", icon: FiHome },
     { label: "Records", icon: FiDollarSign },
+    { label: "Expenditure", icon: FiArrowDownRight },
     { label: "Analytics", icon: FiBarChart2 },
     { label: "Users", icon: FiUsers },
     { label: "Settings", icon: FiSettings },
@@ -165,7 +177,7 @@ const AdminDashboard = ({ admin, workers, records, onUpdateWorker, onAddRecord, 
 
         {activePage === "Overview" && (
           <section className="page-content">
-            <div className="welcome-row"><div><p className="section-kicker">YOUR BUSINESS, AT A GLANCE</p><h2>Good day, {admin.name.split(" ")[0]}.</h2><p className="muted-copy">Here is what is happening at the shop today.</p></div><button className="secondary-button" onClick={() => { setActivePage("Records"); setShowExpenseForm(true); }}><FiPlus /> Add expenditure</button></div>
+            <div className="welcome-row"><div><p className="section-kicker">YOUR BUSINESS, AT A GLANCE</p><h2>Good day, {admin.name.split(" ")[0]}.</h2><p className="muted-copy">Here is what is happening at the shop today.</p></div><button className="secondary-button" onClick={() => setActivePage("Expenditure")}><FiPlus /> Add expenditure</button></div>
             <div className="metric-grid">
               <Metric icon={FiArrowUpRight} label="Daily income" value={money(todayIncome)} note="Recorded services today" tone="gold" />
               <Metric icon={FiArrowDownRight} label="Daily expenditure" value={money(todayExpenses)} note="Expenses logged today" tone="rose" />
@@ -195,10 +207,23 @@ const AdminDashboard = ({ admin, workers, records, onUpdateWorker, onAddRecord, 
 
         {activePage === "Records" && (
           <section className="page-content">
-            <div className="page-intro"><div><p className="section-kicker">SHOP LEDGER</p><h2>All records</h2><p className="muted-copy">Service and expenditure entries from your team.</p></div><button className="primary-button" onClick={() => setShowExpenseForm(!showExpenseForm)}><FiPlus /> Record expenditure</button></div>
-            {showExpenseForm && <form className="inline-form panel" onSubmit={addExpense}><label>Expense description<input required value={expenseTitle} onChange={(event) => setExpenseTitle(event.target.value)} placeholder="e.g. Clippers and supplies" /></label><label>Amount in naira<input required min="1" type="number" value={expenseAmount} onChange={(event) => setExpenseAmount(event.target.value)} placeholder="0" /></label><button className="primary-button" type="submit">Save expense</button><button className="icon-button" type="button" aria-label="Cancel" onClick={() => setShowExpenseForm(false)}><FiX /></button></form>}
-            {actionMessage && <p className="auth-notice" role="alert">{actionMessage}</p>}
-            <section className="panel table-panel">{actionMessage && <p className="auth-notice" role="alert">{actionMessage}</p>}<RecordHistory records={records} workers={workers} showUser onReactToRecord={reactToRecord} /></section>
+            <div className="page-intro"><div><p className="section-kicker">SHOP LEDGER</p><h2>Service records</h2><p className="muted-copy">Completed services recorded by your team.</p></div></div>
+            {actionMessage && <p className="auth-notice notice-error" role="alert">{actionMessage}</p>}
+            <section className="panel table-panel"><RecordHistory records={records} workers={workers} showUser onReactToRecord={reactToRecord} recordType="income" /></section>
+          </section>
+        )}
+
+        {activePage === "Expenditure" && (
+          <section className="page-content">
+            <div className="page-intro"><div><p className="section-kicker">SHOP LEDGER</p><h2>Expenditure</h2><p className="muted-copy">Record shop expenses and review saved expenditure history.</p></div></div>
+            <form className="inline-form panel" onSubmit={addExpense}>
+              <label>Expense description<input required minLength="2" maxLength="120" value={expenseTitle} onChange={(event) => { setExpenseTitle(event.target.value); setExpenseMessage(""); setExpenseSuccess(""); }} placeholder="e.g. Clippers and supplies" /></label>
+              <label>Amount in naira<input required min="0.01" max="1000000000" step="0.01" type="number" value={expenseAmount} onChange={(event) => { setExpenseAmount(event.target.value); setExpenseMessage(""); setExpenseSuccess(""); }} placeholder="0" /></label>
+              <button className="primary-button" type="submit" disabled={savingExpense}>{savingExpense ? "Saving…" : "Save expenditure"}</button>
+            </form>
+            {expenseMessage && <p className="auth-notice notice-error" role="alert">{expenseMessage}</p>}
+            {expenseSuccess && <p className="form-message" role="status">{expenseSuccess}</p>}
+            <section className="panel table-panel"><RecordHistory records={records} workers={workers} showUser recordType="expense" /></section>
           </section>
         )}
 
@@ -221,7 +246,7 @@ const AdminDashboard = ({ admin, workers, records, onUpdateWorker, onAddRecord, 
         )}
 
         {activePage === "Settings" && (
-          <section className="page-content settings-content"><div className="page-intro"><div><p className="section-kicker">ACCOUNT SECURITY</p><h2>Manager settings</h2><p className="muted-copy">Manage your sign-in address and password.</p></div></div><AccountSettings email={admin.email} onChangeEmail={onChangeEmail} onChangePassword={onChangePassword} /><button className="logout-link" onClick={onLogout}><FiLogOut /> Sign out of manager account</button></section>
+          <section className="page-content settings-content"><div className="page-intro"><div><p className="section-kicker">ACCOUNT SECURITY</p><h2>Manager settings</h2><p className="muted-copy">Manage your account details, active devices, sign-in address and password.</p></div></div><AccountSettings user={admin} onChangeEmail={onChangeEmail} onChangePassword={onChangePassword} onGetSessions={onGetSessions} onRevokeSession={onRevokeSession} /><button className="logout-link" onClick={onLogout}><FiLogOut /> Sign out of manager account</button></section>
         )}
         <footer className="dashboard-footer"><span>© {new Date().getFullYear()} SAM BARBING HUB</span><span>NAIRA LEDGER · PRIVATE WORKSPACE</span></footer>
       </main>

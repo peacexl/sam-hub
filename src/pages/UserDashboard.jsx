@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FiBell, FiCheck, FiClock, FiHome, FiLogOut, FiMinus, FiPlus, FiScissors, FiSettings, FiX } from "react-icons/fi";
+import { FiBell, FiCheck, FiClock, FiDollarSign, FiHome, FiLogOut, FiMinus, FiPlus, FiScissors, FiSettings, FiX } from "react-icons/fi";
 import { patch, request } from "../lib/api.js";
 import AccountSettings from "../Components/AccountSettings.jsx";
 import RecordHistory from "../Components/RecordHistory.jsx";
@@ -14,7 +14,7 @@ const groups = [["adultMen", "Adult men"], ["adultWomen", "Adult women"], ["chil
 const priceOptions = [500, 1000, 1500, 2000, 2500, 3000, 3500, 5000];
 const money = (amount) => new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN", maximumFractionDigits: 0 }).format(Number(amount) || 0);
 
-const UserDashboard = ({ user, records, onAddRecord, onChangeEmail, onChangePassword, onLogout }) => {
+const UserDashboard = ({ user, records, onAddRecord, onAddExpenditure, onChangeEmail, onChangePassword, onGetSessions, onRevokeSession, onLogout }) => {
   const [activeTab, setActiveTab] = useState("home");
   const [clientGroup, setClientGroup] = useState("adultMen");
   const [service, setService] = useState(serviceOptions.adultMen[0]);
@@ -22,6 +22,9 @@ const UserDashboard = ({ user, records, onAddRecord, onChangeEmail, onChangePass
   const [amount, setAmount] = useState("");
   const [expenseAmount, setExpenseAmount] = useState("");
   const [expenseDescription, setExpenseDescription] = useState("");
+  const [expenseFeedback, setExpenseFeedback] = useState("");
+  const [expenseSuccess, setExpenseSuccess] = useState("");
+  const [expenseBusy, setExpenseBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -76,10 +79,6 @@ const UserDashboard = ({ user, records, onAddRecord, onChangeEmail, onChangePass
       setFeedback("Choose a service and enter an amount.");
       return;
     }
-    if ((Number(expenseAmount) > 0 && !expenseDescription.trim()) || (expenseDescription.trim() && Number(expenseAmount) <= 0)) {
-      setFeedback("Enter both the expenditure details and amount, or leave both empty.");
-      return;
-    }
     setConfirmOpen(true);
   };
 
@@ -90,13 +89,9 @@ const UserDashboard = ({ user, records, onAddRecord, onChangeEmail, onChangePass
         service: serviceName,
         amount: Number(amount),
         type: "income",
-        expenditureAmount: Number(expenseAmount) || 0,
-        expenditureDescription: expenseDescription.trim(),
       });
       setConfirmOpen(false);
       setAmount("");
-      setExpenseAmount("");
-      setExpenseDescription("");
       setSuccessOpen(true);
     } catch (error) {
       setConfirmOpen(false);
@@ -104,6 +99,31 @@ const UserDashboard = ({ user, records, onAddRecord, onChangeEmail, onChangePass
       setActiveTab("home");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const submitExpenditure = async (event) => {
+    event.preventDefault();
+    const description = expenseDescription.trim();
+    const value = Number(expenseAmount);
+    if (description.length < 2 || description.length > 120 || !Number.isFinite(value) || value <= 0 || value > 1_000_000_000) {
+      setExpenseFeedback("Enter a description between 2 and 120 characters and a valid amount.");
+      setExpenseSuccess("");
+      return;
+    }
+
+    setExpenseBusy(true);
+    setExpenseFeedback("");
+    setExpenseSuccess("");
+    try {
+      await onAddExpenditure({ description, amount: value });
+      setExpenseDescription("");
+      setExpenseAmount("");
+      setExpenseSuccess("Expenditure saved successfully.");
+    } catch (error) {
+      setExpenseFeedback(error.message || "Unable to save the expenditure.");
+    } finally {
+      setExpenseBusy(false);
     }
   };
 
@@ -141,29 +161,47 @@ const UserDashboard = ({ user, records, onAddRecord, onChangeEmail, onChangePass
               {!isCustomService ? <label>Service<select required value={service} onChange={(event) => setService(event.target.value)}>{selectedGroupServices.map((option) => <option key={option} value={option}>{option}</option>)}<option value="Other / custom service">Other / custom service</option></select></label> : <label>Other service<input autoFocus required maxLength="120" value={customService} onChange={(event) => setCustomService(event.target.value)} placeholder="Describe the service" /></label>}
               <label>AMOUNT<span className="amount-entry"><button className="amount-step" type="button" aria-label="Reduce amount by 500 naira" onClick={() => changePrice(-500)}><FiMinus /></button><span className="amount-input-wrap"><span>₦</span><input required min="500" max="1000000000" step="500" type="number" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0" /></span><button className="amount-step" type="button" aria-label="Increase amount by 500 naira" onClick={() => changePrice(500)}><FiPlus /></button></span></label>
               <div className="price-board" aria-label="Common service prices">{priceOptions.map((price) => <button className={Number(amount) === price ? "selected" : ""} type="button" key={price} aria-pressed={Number(amount) === price} onClick={() => setPrice(price)}>{price.toLocaleString("en-NG")}</button>)}</div>
-              <fieldset className="worker-expense-fieldset"><legend>EXPENDITURE <small>Optional</small></legend><label>What was it for?<input maxLength="120" value={expenseDescription} onChange={(event) => setExpenseDescription(event.target.value)} placeholder="Write the expense in words" /></label><label>Amount in naira<input min="0" max="1000000000" step="1" type="number" value={expenseAmount} onChange={(event) => setExpenseAmount(event.target.value)} placeholder="0" /></label></fieldset>
               {feedback && <p className="form-message" role="alert">{feedback}</p>}
               <button className="primary-button worker-submit" type="submit"><FiCheck /> Review record</button>
             </form>
           </section>
         </>}
 
-        {activeTab === "history" && <>
-          {notifications.length > 0 && <section className="panel worker-notification-panel"><div className="panel-heading"><div><p className="section-kicker">UPDATES</p><h2>Notifications</h2></div><span className="record-count">{unreadCount} unread</span></div><div className="worker-notifications">{notifications.map((notification) => <button className={`worker-notification ${notification.readAt ? "" : "unread"}`} key={notification.id} onClick={() => markNotificationRead(notification)}><FiBell /><span>{notification.message}</span><small>{new Date(notification.createdAt).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" })}</small></button>)}</div></section>}
-          <section className="panel worker-records-panel worker-history-view"><div className="panel-heading"><div><p className="section-kicker">YOUR ACTIVITY</p><h2>Record history</h2></div><span className="record-count">{userRecords.length} total</span></div><RecordHistory records={userRecords} /></section>
+        {activeTab === "expenditure" && <>
+          <div className="worker-welcome"><div><p className="section-kicker">SHOP LEDGER</p><h1>Expenditure</h1><p className="muted-copy">Record a shop expense separately from service entries.</p></div></div>
+          <section className="panel worker-entry-panel worker-expense-panel">
+            <div className="panel-heading"><div><p className="section-kicker">NEW EXPENDITURE</p><h2>Record an expense</h2></div><span className="summary-icon"><FiDollarSign /></span></div>
+            <form className="worker-record-form" onSubmit={submitExpenditure}>
+              <label>Expense description<input required minLength="2" maxLength="120" value={expenseDescription} onChange={(event) => { setExpenseDescription(event.target.value); setExpenseFeedback(""); setExpenseSuccess(""); }} placeholder="e.g. Clippers and supplies" /></label>
+              <label>Amount in naira<input required min="0.01" max="1000000000" step="0.01" type="number" value={expenseAmount} onChange={(event) => { setExpenseAmount(event.target.value); setExpenseFeedback(""); setExpenseSuccess(""); }} placeholder="0" /></label>
+              {expenseFeedback && <p className="auth-notice notice-error" role="alert">{expenseFeedback}</p>}
+              {expenseSuccess && <p className="form-message" role="status">{expenseSuccess}</p>}
+              <button className="primary-button worker-submit" type="submit" disabled={expenseBusy}><FiCheck /> {expenseBusy ? "Saving…" : "Save expenditure"}</button>
+            </form>
+          </section>
+          <section className="panel worker-records-panel worker-history-view">
+            <div className="panel-heading"><div><p className="section-kicker">YOUR ACTIVITY</p><h2>Expenditure history</h2></div><span className="record-count">{userRecords.filter((record) => record.type === "expense").length} total</span></div>
+            <RecordHistory records={userRecords} recordType="expense" />
+          </section>
         </>}
 
-        {activeTab === "settings" && <section className="worker-settings-view"><div className="page-intro"><div><p className="section-kicker">ACCOUNT PREFERENCES</p><h2>Settings</h2><p className="muted-copy">Change the email or password you use to sign in.</p></div></div><AccountSettings email={user.email} onChangeEmail={onChangeEmail} onChangePassword={onChangePassword} /></section>}
+        {activeTab === "history" && <>
+          {notifications.length > 0 && <section className="panel worker-notification-panel"><div className="panel-heading"><div><p className="section-kicker">UPDATES</p><h2>Notifications</h2></div><span className="record-count">{unreadCount} unread</span></div><div className="worker-notifications">{notifications.map((notification) => <button className={`worker-notification ${notification.readAt ? "" : "unread"}`} key={notification.id} onClick={() => markNotificationRead(notification)}><FiBell /><span>{notification.message}</span><small>{new Date(notification.createdAt).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" })}</small></button>)}</div></section>}
+          <section className="panel worker-records-panel worker-history-view"><div className="panel-heading"><div><p className="section-kicker">YOUR ACTIVITY</p><h2>Service history</h2></div><span className="record-count">{serviceRecords.length} total</span></div><RecordHistory records={serviceRecords} recordType="income" /></section>
+        </>}
+
+        {activeTab === "settings" && <section className="worker-settings-view"><div className="page-intro"><div><p className="section-kicker">ACCOUNT PREFERENCES</p><h2>Settings</h2><p className="muted-copy">Review your account details, devices and sign-in information.</p></div></div><AccountSettings user={user} onChangeEmail={onChangeEmail} onChangePassword={onChangePassword} onGetSessions={onGetSessions} onRevokeSession={onRevokeSession} /></section>}
       </section>
 
       <nav className="worker-bottom-nav" aria-label="Worker pages">
         <button className={activeTab === "home" ? "selected" : ""} aria-current={activeTab === "home" ? "page" : undefined} onClick={() => setActiveTab("home")}><FiHome /><span>Home</span></button>
         <button className={activeTab === "history" ? "selected" : ""} aria-current={activeTab === "history" ? "page" : undefined} onClick={() => setActiveTab("history")}><span className="worker-nav-icon"><FiClock />{unreadCount > 0 && <i>{unreadCount}</i>}</span><span>Record history</span></button>
+        <button className={activeTab === "expenditure" ? "selected" : ""} aria-current={activeTab === "expenditure" ? "page" : undefined} onClick={() => setActiveTab("expenditure")}><FiDollarSign /><span>Expenditure</span></button>
         <button className={activeTab === "settings" ? "selected" : ""} aria-current={activeTab === "settings" ? "page" : undefined} onClick={() => setActiveTab("settings")}><FiSettings /><span>Settings</span></button>
       </nav>
 
-      {confirmOpen && <div className="modal-backdrop"><section className="confirmation-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-record-title"><div className="modal-heading"><span className="modal-mark"><FiCheck /></span><button className="icon-button" aria-label="Close confirmation" onClick={() => setConfirmOpen(false)}><FiX /></button></div><p className="section-kicker">CONFIRM ENTRY</p><h2 id="confirm-record-title">Submit this record?</h2><div className="confirmation-details"><div><span>Client group</span><strong>{groups.find(([group]) => group === clientGroup)?.[1]}</strong></div><div><span>Service</span><strong>{serviceName}</strong></div><div><span>Amount</span><strong>{money(amount)}</strong></div>{Number(expenseAmount) > 0 && <div><span>Expenditure</span><strong>{expenseDescription} · {money(expenseAmount)}</strong></div>}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setConfirmOpen(false)}>Go back</button><button className="primary-button" type="button" disabled={busy} onClick={submitRecord}>{busy ? "Submitting…" : "Confirm submission"}</button></div></section></div>}
-      {successOpen && <div className="modal-backdrop"><section className="confirmation-modal success-modal" role="dialog" aria-modal="true" aria-labelledby="record-success-title"><span className="modal-mark"><FiCheck /></span><p className="section-kicker">RECORD SAVED</p><h2 id="record-success-title">Submission complete</h2><p className="muted-copy">Your service and any expenditure were added to your record history.</p><button className="primary-button" type="button" onClick={() => setSuccessOpen(false)}>Done</button></section></div>}
+      {confirmOpen && <div className="modal-backdrop"><section className="confirmation-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-record-title"><div className="modal-heading"><span className="modal-mark"><FiCheck /></span><button className="icon-button" aria-label="Close confirmation" onClick={() => setConfirmOpen(false)}><FiX /></button></div><p className="section-kicker">CONFIRM ENTRY</p><h2 id="confirm-record-title">Submit this record?</h2><div className="confirmation-details"><div><span>Client group</span><strong>{groups.find(([group]) => group === clientGroup)?.[1]}</strong></div><div><span>Service</span><strong>{serviceName}</strong></div><div><span>Amount</span><strong>{money(amount)}</strong></div></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setConfirmOpen(false)}>Go back</button><button className="primary-button" type="button" disabled={busy} onClick={submitRecord}>{busy ? "Submitting…" : "Confirm submission"}</button></div></section></div>}
+      {successOpen && <div className="modal-backdrop"><section className="confirmation-modal success-modal" role="dialog" aria-modal="true" aria-labelledby="record-success-title"><span className="modal-mark"><FiCheck /></span><p className="section-kicker">RECORD SAVED</p><h2 id="record-success-title">Submission complete</h2><p className="muted-copy">Your service was added to your service history.</p><button className="primary-button" type="button" onClick={() => setSuccessOpen(false)}>Done</button></section></div>}
     </main>
   );
 };

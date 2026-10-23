@@ -77,6 +77,18 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires);
+
+  CREATE TABLE IF NOT EXISTS user_sessions (
+    sid TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_name TEXT NOT NULL,
+    user_agent TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    revoked_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS user_sessions_user_last_seen ON user_sessions(user_id, last_seen);
 `);
 
 const userColumns = db.pragma("table_info(users)");

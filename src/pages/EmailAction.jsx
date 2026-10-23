@@ -5,13 +5,29 @@ import PasswordInput from "../Components/PasswordInput.jsx";
 
 const EmailAction = ({ action, token, onDone }) => {
   const started = useRef(false);
-  const [status, setStatus] = useState(action === "verify" ? "loading" : "ready");
+  const [status, setStatus] = useState(["verify", "reset"].includes(action) ? "loading" : "ready");
+  const [tokenVerified, setTokenVerified] = useState(false);
   const [message, setMessage] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
 
   useEffect(() => {
-    if (!['verify', 'change-email'].includes(action) || started.current) return;
+    if (started.current) return;
+    if (action === "reset") {
+      started.current = true;
+      post("/auth/validate-reset-token", { token })
+        .then((result) => {
+          setTokenVerified(true);
+          setMessage(result.message);
+          setStatus("ready");
+        })
+        .catch((error) => {
+          setMessage(error.message);
+          setStatus("error");
+        });
+      return;
+    }
+    if (!["verify", "change-email"].includes(action)) return;
     started.current = true;
     post(action === "verify" ? "/auth/verify-email" : "/auth/confirm-email-change", { token })
       .then((result) => {
@@ -51,7 +67,12 @@ const EmailAction = ({ action, token, onDone }) => {
           <div className="auth-eyebrow"><span className="status-dot" /> ACCOUNT SECURITY</div>
           <h1>{action === "reset" ? "Choose a new password" : action === "change-email" ? "Confirm email change" : "Email verification"}</h1>
           <p className="auth-subtitle">{action === "reset" ? "Choose a strong password you have not used before." : action === "change-email" ? "We are confirming the new address on your account." : "We are confirming your email address."}</p>
-          {action === "reset" && status !== "success" && (
+          {action === "reset" && !tokenVerified && (
+            <p className={`auth-notice ${status === "error" ? "notice-error" : ""}`} role="status">
+              {status === "loading" ? "Checking your secure link…" : message}
+            </p>
+          )}
+          {action === "reset" && tokenVerified && status !== "success" && (
             <form className="auth-form" onSubmit={submit}>
               <label className="field-label">New password<PasswordInput autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" /></label>
               <label className="field-label">Confirm password<PasswordInput autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter it again" /></label>

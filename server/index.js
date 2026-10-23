@@ -5,7 +5,7 @@ import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import bcrypt from "bcryptjs";
 import nodemailer from "nodemailer";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import process from "node:process";
@@ -15,6 +15,7 @@ import db from "./db.js";
 const app = express();
 const port = Number(process.env.PORT || 3001);
 const isProduction = process.env.NODE_ENV === "production";
+const rememberedSessionMs = 30 * 24 * 60 * 60 * 1000;
 const sessionSecret = process.env.SESSION_SECRET;
 const smtpConfigured = Boolean(process.env.SMTP_HOST && process.env.SMTP_FROM);
 
@@ -123,7 +124,6 @@ app.use(session({
     httpOnly: true,
     sameSite: "strict",
     secure: isProduction,
-    maxAge: 14 * 24 * 60 * 60 * 1000,
   },
 }));
 
@@ -150,12 +150,23 @@ const toPublicRecord = (row) => ({
   userId: row.user_id, user: row.user, createdAt: row.created_at,
   reaction: row.reaction, reactedAt: row.reacted_at,
 });
+const deviceNameFor = (userAgent) => {
+  const browser = /Edg\//.test(userAgent) ? "Edge"
+    : /Firefox\//.test(userAgent) ? "Firefox"
+      : /OPR\//.test(userAgent) ? "Opera"
+        : /Chrome\//.test(userAgent) ? "Chrome"
+          : /Safari\//.test(userAgent) ? "Safari" : "Browser";
+  const device = /iPad|Tablet/i.test(userAgent) ? "Tablet"
+    : /Mobile|Android|iPhone/i.test(userAgent) ? "Mobile"
+      : "Computer";
+  return `${browser} on ${device}`;
+};
 const validEmail = (email) => typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const validPassword = (password) => typeof password === "string" && password.length >= 8 && password.length <= 128;
 const hashToken = (token) => createHash("sha256").update(token).digest("hex");
 
-const createAuthToken = (userId, purpose, expiresInMs) => {
-  const token = randomBytes(32).toString("base64url");
+const createAuthToken = (userId, purpose, expiresInMs, suppliedToken) => {
+  const token = suppliedToken || randomBytes(32).toString("base64url");
   const tokenHash = hashToken(token);
   db.prepare("DELETE FROM auth_tokens WHERE user_id = ? AND purpose = ?").run(userId, purpose);
   db.prepare("INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at, created_at) VALUES (?, ?, ?, ?, ?)")
@@ -193,11 +204,39 @@ const emailAction = async ({ user, purpose, subject, heading, action, lifetime, 
   return link;
 };
 
+const emailVerificationCode = async (user) => {
+  const code = String(randomInt(0, 100_000_000)).padStart(8, "0");
+  createAuthToken(user.id, "verify-email", 15 * 60 * 1000, code);
+  const subject = "Your Sam Barbing Hub verification code";
+  const text = `Your email verification code is ${code}.\n\nIt expires in 15 minutes. If you did not request this, you can ignore this email.`;
+  const html = `<main style="font-family:Arial,sans-serif;color:#f4efdf;background:#171714;padding:32px"><div style="max-width:520px;margin:auto;border:1px solid #b8995d;padding:28px"><p style="color:#d3b66e;letter-spacing:2px">SAM BARBING HUB</p><h1 style="font-size:23px">Verify your email</h1><p>Enter this code to verify your email address:</p><p style="font-size:30px;font-weight:bold;letter-spacing:8px">${code}</p><p style="color:#c7c2b5;font-size:13px">This code expires in 15 minutes. If you did not request this, you can ignore this email.</p></div></main>`;
+  if (mailTransport) {
+    await mailTransport.sendMail({ from: process.env.SMTP_FROM, to: user.email, subject, text, html });
+    return null;
+  }
+  if (isProduction) throw new Error("Email delivery is not configured.");
+  console.info(`[local email] ${subject} for ${user.email}: ${code}`);
+  return code;
+};
+
 const requireAuth = (request, response, next) => {
   const user = request.session.userId ? findUser.get(request.session.userId) : null;
   if (!user || !user.email_verified_at || user.status === "disabled" || (user.role === "worker" && user.status !== "approved")) {
     if (request.session.userId) request.session.destroy(() => {});
     return response.status(401).json({ message: "Please sign in to continue." });
+  }
+  const trackedSession = db.prepare("SELECT revoked_at FROM user_sessions WHERE sid = ?").get(request.sessionID);
+  if (trackedSession?.revoked_at) {
+    request.session.destroy(() => {});
+    return response.status(401).json({ message: "This device session has been signed out." });
+  }
+  const now = new Date().toISOString();
+  if (!trackedSession) {
+    const userAgent = String(request.get("user-agent") || "").slice(0, 500);
+    db.prepare("INSERT INTO user_sessions (sid, user_id, device_name, user_agent, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(request.sessionID, user.id, deviceNameFor(userAgent), userAgent, now, now);
+  } else {
+    db.prepare("UPDATE user_sessions SET last_seen = ? WHERE sid = ?").run(now, request.sessionID);
   }
   request.user = user;
   return next();
@@ -210,15 +249,29 @@ const requireAdmin = (request, response, next) => {
   return next();
 };
 
-const beginSession = (request, user) => new Promise((resolveSession, reject) => {
+const beginSession = (request, user, rememberMe) => new Promise((resolveSession, reject) => {
   request.session.regenerate((error) => {
     if (error) return reject(error);
     request.session.userId = user.id;
-    request.session.save((saveError) => saveError ? reject(saveError) : resolveSession());
+    request.session.cookie.maxAge = rememberMe ? rememberedSessionMs : null;
+    request.session.save((saveError) => {
+      if (saveError) return reject(saveError);
+      const now = new Date().toISOString();
+      const userAgent = String(request.get("user-agent") || "").slice(0, 500);
+      try {
+        db.prepare("INSERT INTO user_sessions (sid, user_id, device_name, user_agent, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(request.sessionID, user.id, deviceNameFor(userAgent), userAgent, now, now);
+        resolveSession();
+      } catch (trackingError) {
+        reject(trackingError);
+      }
+    });
   });
 });
 
 const deleteSessionsForUser = (userId, exceptSid = "") => {
+  db.prepare("UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND sid != ? AND revoked_at IS NULL")
+    .run(new Date().toISOString(), userId, exceptSid);
   const rows = db.prepare("SELECT sid, sess FROM sessions").all();
   const remove = db.prepare("DELETE FROM sessions WHERE sid = ?");
   for (const row of rows) {
@@ -256,11 +309,8 @@ app.post("/api/auth/setup-admin", authLimiter, async (request, response, next) =
     });
     const user = createAdmin();
     if (!user) return response.status(409).json({ code: "ADMIN_EXISTS", message: "A manager account already exists. Sign in or return to worker access." });
-    const devLink = await emailAction({
-      user, purpose: "verify-email", subject: "Verify your Sam Barbing Hub manager email",
-      heading: "Verify your manager email", action: "verify your email", lifetime: 24 * 60 * 60 * 1000,
-    });
-    return response.status(201).json({ message: "Manager account created. Verify your email before signing in.", devLink });
+    const devCode = await emailVerificationCode(user);
+    return response.status(201).json({ message: "Manager account created. Enter the verification code sent to your email within 15 minutes.", devCode });
   } catch (error) {
     if (error.code?.startsWith("SQLITE_CONSTRAINT")) {
       return response.status(409).json({ message: "That email is already registered, or manager setup has already been completed." });
@@ -282,11 +332,8 @@ app.post("/api/auth/register", authLimiter, async (request, response, next) => {
     };
     db.prepare("INSERT INTO users (id, name, email, password_hash, role, status, created_at) VALUES (?, ?, ?, ?, 'worker', 'pending', ?)")
       .run(worker.id, worker.name, worker.email, worker.passwordHash, worker.createdAt);
-    const devLink = await emailAction({
-      user: worker, purpose: "verify-email", subject: "Verify your Sam Barbing Hub email",
-      heading: "Verify your email", action: "verify your email", lifetime: 24 * 60 * 60 * 1000,
-    });
-    return response.status(201).json({ message: "Account created. Verify your email, then wait for manager approval.", devLink });
+    const devCode = await emailVerificationCode(worker);
+    return response.status(201).json({ message: "Account created. Enter the verification code sent to your email within 15 minutes.", devCode });
   } catch (error) {
     if (error.code?.startsWith("SQLITE_CONSTRAINT")) {
       return response.status(409).json({ message: "An account with this email already exists." });
@@ -296,19 +343,24 @@ app.post("/api/auth/register", authLimiter, async (request, response, next) => {
 });
 
 app.post("/api/auth/verify-email", authLimiter, (request, response) => {
-  const { token } = request.body || {};
-  if (typeof token !== "string" || token.length > 200) return response.status(400).json({ message: "This verification link is invalid or expired." });
+  const { token, code } = request.body || {};
+  const suppliedCode = typeof code === "string" ? code.trim() : "";
+  const suppliedToken = typeof token === "string" ? token : "";
+  const verificationValue = suppliedCode || suppliedToken;
+  if (!/^\d{8}$/.test(suppliedCode) && (suppliedToken.length < 1 || suppliedToken.length > 200)) {
+    return response.status(400).json({ message: "Enter the 8-digit verification code from your email." });
+  }
   const verify = db.transaction(() => {
     const authToken = db.prepare("SELECT user_id FROM auth_tokens WHERE token_hash = ? AND purpose = 'verify-email' AND expires_at > ?")
-      .get(hashToken(token), Date.now());
+      .get(hashToken(verificationValue), Date.now());
     if (!authToken) return null;
     db.prepare("UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?")
       .run(new Date().toISOString(), authToken.user_id);
-    db.prepare("DELETE FROM auth_tokens WHERE token_hash = ?").run(hashToken(token));
+    db.prepare("DELETE FROM auth_tokens WHERE token_hash = ?").run(hashToken(verificationValue));
     return findUser.get(authToken.user_id);
   });
   const user = verify();
-  if (!user) return response.status(400).json({ message: "This verification link is invalid or expired." });
+  if (!user) return response.status(400).json({ message: "This verification code is invalid or expired. Request a new code and try again." });
   return response.json({ message: user.role === "worker"
     ? "Email verified. Your manager must approve the account before you can sign in."
     : "Email verified. You can now sign in as manager." });
@@ -316,15 +368,12 @@ app.post("/api/auth/verify-email", authLimiter, (request, response) => {
 
 app.post("/api/auth/resend-verification", authLimiter, async (request, response, next) => {
   const email = typeof request.body?.email === "string" ? request.body.email.trim().toLowerCase() : "";
-  const genericMessage = "If the account needs verification, a new link has been sent.";
+  const genericMessage = "If the account needs verification, a new code has been sent.";
   const user = validEmail(email) ? db.prepare("SELECT * FROM users WHERE email = ? AND email_verified_at IS NULL").get(email) : null;
   if (!user) return response.json({ message: genericMessage });
   try {
-    const devLink = await emailAction({
-      user, purpose: "verify-email", subject: "Your Sam Barbing Hub verification link",
-      heading: "Verify your email", action: "verify your email", lifetime: 24 * 60 * 60 * 1000,
-    });
-    return response.json({ message: genericMessage, devLink });
+    const devCode = await emailVerificationCode(user);
+    return response.json({ message: genericMessage, devCode });
   } catch (error) {
     return next(error);
   }
@@ -344,6 +393,19 @@ app.post("/api/auth/forgot-password", authLimiter, async (request, response, nex
   } catch (error) {
     return next(error);
   }
+});
+
+app.post("/api/auth/validate-reset-token", authLimiter, (request, response) => {
+  const { token } = request.body || {};
+  if (typeof token !== "string" || token.length < 1 || token.length > 200) {
+    return response.status(400).json({ message: "This password-reset link is invalid or expired." });
+  }
+  const authToken = db.prepare("SELECT user_id FROM auth_tokens WHERE token_hash = ? AND purpose = 'reset-password' AND expires_at > ?")
+    .get(hashToken(token), Date.now());
+  if (!authToken) {
+    return response.status(400).json({ message: "This password-reset link is invalid or expired." });
+  }
+  return response.json({ message: "Reset link verified." });
 });
 
 app.post("/api/auth/reset-password", authLimiter, async (request, response, next) => {
@@ -426,7 +488,7 @@ app.post("/api/auth/confirm-email-change", authLimiter, (request, response) => {
 });
 
 app.post("/api/auth/login", authLimiter, async (request, response, next) => {
-  const { email, password, role } = request.body || {};
+  const { email, password, role, rememberMe } = request.body || {};
   if (!validEmail(email) || typeof password !== "string" || !["admin", "worker"].includes(role)) {
     return response.status(400).json({ message: "Enter a valid email, password, and account type." });
   }
@@ -440,7 +502,7 @@ app.post("/api/auth/login", authLimiter, async (request, response, next) => {
     if (!user.email_verified_at) return response.status(403).json({ code: "EMAIL_NOT_VERIFIED", message: "Verify your email before signing in." });
     if (user.status === "pending") return response.status(403).json({ code: "PENDING", message: "Your account is waiting for manager approval." });
     if (user.status === "disabled") return response.status(403).json({ code: "DISABLED", message: "This account is disabled. Contact the manager." });
-    await beginSession(request, user);
+    await beginSession(request, user, rememberMe === true);
     return response.json({ user: toPublicUser(user) });
   } catch (error) {
     return next(error);
@@ -452,9 +514,45 @@ app.get("/api/auth/session", (request, response) => {
   return requireAuth(request, response, () => response.json({ user: toPublicUser(request.user) }));
 });
 
+app.get("/api/account/sessions", requireAuth, (request, response) => {
+  const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const sessions = db.prepare(`
+    SELECT tracked.sid, tracked.device_name, tracked.created_at, tracked.last_seen
+    FROM user_sessions AS tracked
+    JOIN sessions AS stored ON stored.sid = tracked.sid
+    WHERE tracked.user_id = ? AND tracked.revoked_at IS NULL
+      AND tracked.last_seen >= ? AND stored.expires > ?
+    ORDER BY tracked.last_seen DESC
+  `).all(request.user.id, cutoff, Date.now()).map((item) => ({
+    id: item.sid,
+    device: item.device_name,
+    createdAt: item.created_at,
+    lastSeen: item.last_seen,
+    isCurrent: item.sid === request.sessionID,
+  }));
+  return response.json({ sessions });
+});
+
+app.post("/api/account/session/heartbeat", requireAuth, (_request, response) => response.json({ ok: true }));
+
+app.delete("/api/account/sessions/:id", requireAuth, (request, response) => {
+  if (request.params.id === request.sessionID) {
+    return response.status(400).json({ message: "Use sign out to end the current device session." });
+  }
+  const tracked = db.prepare("SELECT sid FROM user_sessions WHERE sid = ? AND user_id = ? AND revoked_at IS NULL")
+    .get(request.params.id, request.user.id);
+  if (!tracked) return response.status(404).json({ message: "That active session was not found." });
+  db.prepare("UPDATE user_sessions SET revoked_at = ? WHERE sid = ?")
+    .run(new Date().toISOString(), tracked.sid);
+  db.prepare("DELETE FROM sessions WHERE sid = ?").run(tracked.sid);
+  return response.json({ ok: true });
+});
+
 app.post("/api/auth/logout", (request, response, next) => {
   request.session.destroy((error) => {
     if (error) return next(error);
+    db.prepare("UPDATE user_sessions SET revoked_at = ? WHERE sid = ? AND revoked_at IS NULL")
+      .run(new Date().toISOString(), request.sessionID);
     response.clearCookie("sam_hub_session", { httpOnly: true, sameSite: "strict", secure: isProduction });
     return response.status(204).end();
   });
@@ -485,40 +583,45 @@ app.get("/api/records", requireAuth, (request, response) => {
 });
 
 app.post("/api/records", requireAuth, (request, response, next) => {
-  const { service, amount, type, expenditureDescription = "" } = request.body || {};
-  const expenditureAmount = Number(request.body?.expenditureAmount || 0);
-  const allowedType = request.user.role === "worker" ? type === "income" : type === "expense";
-  if (typeof service !== "string" || service.trim().length < 2 || service.trim().length > 120 || !Number.isFinite(Number(amount)) || Number(amount) <= 0 || Number(amount) > 1_000_000_000 || !Number.isFinite(expenditureAmount) || expenditureAmount < 0 || expenditureAmount > 1_000_000_000 || typeof expenditureDescription !== "string" || expenditureDescription.length > 120 || (type === "expense" && expenditureAmount > 0) || !allowedType) {
+  const { service, amount, type } = request.body || {};
+  if (request.user.role !== "worker" || type !== "income" || typeof service !== "string" || service.trim().length < 2 || service.trim().length > 120 || !Number.isFinite(Number(amount)) || Number(amount) <= 0 || Number(amount) > 1_000_000_000) {
     return response.status(400).json({ message: "Enter a valid description and amount." });
   }
 
   try {
-    const insert = db.prepare("INSERT INTO records (id, service, amount, type, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)");
     const createdAt = new Date().toISOString();
-    const records = db.transaction(() => {
-      const added = [];
-      const record = {
-        id: randomUUID(), service: service.trim(), amount: Number(amount), type,
-        userId: request.user.id, user: request.user.name, createdAt,
-      };
-      insert.run(record.id, record.service, record.amount, record.type, record.userId, record.createdAt);
-      added.push(record);
-      if (request.user.role === "worker" && expenditureAmount > 0) {
-        const expense = {
-          id: randomUUID(),
-          service: expenditureDescription.trim() || `Expenses for ${record.service}`,
-          amount: expenditureAmount,
-          type: "expense",
-          userId: request.user.id,
-          user: request.user.name,
-          createdAt,
-        };
-        insert.run(expense.id, expense.service, expense.amount, expense.type, expense.userId, expense.createdAt);
-        added.push(expense);
-      }
-      return added;
-    })();
-    return response.status(201).json({ record: records[0], records });
+    const record = {
+      id: randomUUID(), service: service.trim(), amount: Number(amount), type,
+      userId: request.user.id, user: request.user.name, createdAt,
+    };
+    db.prepare("INSERT INTO records (id, service, amount, type, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(record.id, record.service, record.amount, record.type, record.userId, record.createdAt);
+    return response.status(201).json({ record });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/expenditures", requireAuth, (request, response, next) => {
+  const { description, amount } = request.body || {};
+  const value = Number(amount);
+  if (typeof description !== "string" || description.trim().length < 2 || description.trim().length > 120 || !Number.isFinite(value) || value <= 0 || value > 1_000_000_000) {
+    return response.status(400).json({ message: "Enter an expenditure description and a valid amount." });
+  }
+
+  try {
+    const record = {
+      id: randomUUID(),
+      service: description.trim(),
+      amount: value,
+      type: "expense",
+      userId: request.user.id,
+      user: request.user.name,
+      createdAt: new Date().toISOString(),
+    };
+    db.prepare("INSERT INTO records (id, service, amount, type, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(record.id, record.service, record.amount, record.type, record.userId, record.createdAt);
+    return response.status(201).json({ record });
   } catch (error) {
     return next(error);
   }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Login from "./pages/Login.jsx";
 import EmailAction from "./pages/EmailAction.jsx";
 import AdminDashboard from "./pages/AdminDashboard.jsx";
@@ -52,14 +52,28 @@ const App = () => {
 		return () => { mounted = false; };
 	}, []);
 
-	const handleAuthenticate = async ({ name, email, password, role, isRegister }) => {
+	useEffect(() => {
+		if (!user) return undefined;
+		const heartbeat = () => post("/account/session/heartbeat", {}).catch((error) => {
+			if (error.status === 401) {
+				setServiceError(error.message);
+				setUser(null);
+			} else {
+				console.warn("Could not refresh the active device session.", error);
+			}
+		});
+		const timer = window.setInterval(heartbeat, 60_000);
+		return () => window.clearInterval(timer);
+	}, [user]);
+
+	const handleAuthenticate = async ({ name, email, password, role, isRegister, rememberMe }) => {
 		const result = role === "admin"
 			? isRegister
 				? await post("/auth/setup-admin", { name, email, password })
-				: await post("/auth/login", { email, password, role })
+				: await post("/auth/login", { email, password, role, rememberMe })
 			: isRegister
 				? await post("/auth/register", { name, email, password })
-				: await post("/auth/login", { email, password, role: "worker" });
+				: await post("/auth/login", { email, password, role: "worker", rememberMe });
 		if (role === "admin" && isRegister) setHasAdmin(true);
 
 		if (result.user) {
@@ -94,7 +108,13 @@ const App = () => {
 
 	const addRecord = async (record) => {
 		const result = await post("/records", record);
-		setRecords((current) => [...(result.records || [result.record]).reverse(), ...current]);
+		setRecords((current) => [result.record, ...current]);
+		return { ok: true };
+	};
+
+	const addExpenditure = async (expenditure) => {
+		const result = await post("/expenditures", expenditure);
+		setRecords((current) => [result.record, ...current]);
 		return { ok: true };
 	};
 
@@ -118,6 +138,12 @@ const App = () => {
 
 	const requestPasswordReset = (email) => post("/auth/forgot-password", { email });
 	const resendVerification = (email) => post("/auth/resend-verification", { email });
+	const verifyEmail = (code) => post("/auth/verify-email", { code });
+	const getAccountSessions = useCallback(() => request("/account/sessions"), []);
+	const revokeAccountSession = useCallback(
+		(sessionId) => request(`/account/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
+		[],
+	);
 	const finishEmailAction = () => {
 		window.history.replaceState({}, "", window.location.pathname);
 		setLinkAction(null);
@@ -129,22 +155,24 @@ const App = () => {
 	return (
 		<div className="app-shell">
 			{linkAction ? <EmailAction action={linkAction.action} token={linkAction.token} onDone={finishEmailAction} /> : <>
-				{!user && <Login hasAdmin={hasAdmin} serviceError={serviceError} onAuthenticate={handleAuthenticate} onForgotPassword={requestPasswordReset} onResendVerification={resendVerification} />}
+				{!user && <Login hasAdmin={hasAdmin} serviceError={serviceError} onAuthenticate={handleAuthenticate} onForgotPassword={requestPasswordReset} onResendVerification={resendVerification} onVerifyEmail={verifyEmail} />}
 				{user?.role === "admin" && (
 					<AdminDashboard
 						admin={user}
 						workers={workers}
 						records={records}
 						onUpdateWorker={updateWorker}
-						onAddRecord={addRecord}
+						onAddExpenditure={addExpenditure}
 						onChangePassword={changeAccountPassword}
 						onChangeEmail={changeAccountEmail}
+						onGetSessions={getAccountSessions}
+						onRevokeSession={revokeAccountSession}
 						onReactToRecord={reactToRecord}
 						onLogout={handleLogout}
 					/>
 				)}
 				{user?.role === "worker" && (
-					<UserDashboard user={user} records={records} onAddRecord={addRecord} onChangeEmail={changeAccountEmail} onChangePassword={changeAccountPassword} onLogout={handleLogout} />
+					<UserDashboard user={user} records={records} onAddRecord={addRecord} onAddExpenditure={addExpenditure} onChangeEmail={changeAccountEmail} onChangePassword={changeAccountPassword} onGetSessions={getAccountSessions} onRevokeSession={revokeAccountSession} onLogout={handleLogout} />
 				)}
 			</>}
 		</div>

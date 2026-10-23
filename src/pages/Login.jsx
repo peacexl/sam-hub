@@ -3,27 +3,37 @@ import { FiArrowLeft, FiArrowRight, FiScissors, FiUser } from "react-icons/fi";
 import brandLogo from "../assets/SAMBARBINGHUB NBG.png";
 import PasswordInput from "../Components/PasswordInput.jsx";
 
-const Login = ({ hasAdmin, serviceError, onAuthenticate, onForgotPassword, onResendVerification }) => {
+const Login = ({ hasAdmin, serviceError, onAuthenticate, onForgotPassword, onResendVerification, onVerifyEmail }) => {
   const [view, setView] = useState("worker");
   const [isRegister, setIsRegister] = useState(false);
+  const [forceAdminLogin, setForceAdminLogin] = useState(false);
+  const [awaitingVerification, setAwaitingVerification] = useState(false);
+  const [verificationCode, setVerificationCode] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(false);
   const [notice, setNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [devLink, setDevLink] = useState("");
+  const [devCode, setDevCode] = useState("");
   const [canResend, setCanResend] = useState(false);
   const [returnView, setReturnView] = useState("worker");
   const isAdmin = view === "admin";
   const isForgot = view === "forgot";
-  const creatingAdmin = isAdmin && !hasAdmin;
+  const isProduction = import.meta.env.PROD;
+  const creatingAdmin = isAdmin && isRegister && !forceAdminLogin;
   const registering = isAdmin ? creatingAdmin : !isForgot && isRegister;
 
   const switchView = (nextView) => {
     setView(nextView);
     setIsRegister(nextView === "admin" && !hasAdmin);
+    setForceAdminLogin(false);
+    setAwaitingVerification(false);
+    setVerificationCode("");
     setNotice("");
     setDevLink("");
+    setDevCode("");
     setCanResend(false);
   };
 
@@ -32,7 +42,22 @@ const Login = ({ hasAdmin, serviceError, onAuthenticate, onForgotPassword, onRes
     setSubmitting(true);
     setNotice("");
     setDevLink("");
+    setDevCode("");
     try {
+      if (awaitingVerification) {
+        const result = await onVerifyEmail(verificationCode.trim());
+        setNotice(result.message);
+        setAwaitingVerification(false);
+        setVerificationCode("");
+        setCanResend(false);
+        if (isAdmin) {
+          setIsRegister(false);
+          setForceAdminLogin(true);
+        } else {
+          setIsRegister(false);
+        }
+        return;
+      }
       if (isForgot) {
         const result = await onForgotPassword(email.trim().toLowerCase());
         setNotice(result.message);
@@ -45,16 +70,25 @@ const Login = ({ hasAdmin, serviceError, onAuthenticate, onForgotPassword, onRes
         password,
         role: isAdmin ? "admin" : "worker",
         isRegister: registering,
+        rememberMe,
       });
       setNotice(result?.message || "");
       setDevLink(result?.devLink || "");
+      setDevCode(result?.devCode || "");
+      if (registering) {
+        setAwaitingVerification(true);
+        setCanResend(true);
+      }
       if (registering && !isAdmin) setCanResend(true);
     } catch (error) {
       if (error.code === "ADMIN_EXISTS") {
-        setView("worker");
-        setIsRegister(false);
+        setView("admin");
+        setForceAdminLogin(true);
       }
-      if (error.code === "EMAIL_NOT_VERIFIED") setCanResend(true);
+      if (error.code === "EMAIL_NOT_VERIFIED") {
+        setCanResend(true);
+        setAwaitingVerification(true);
+      }
       setNotice(error.message || "Unable to sign in. Please try again.");
     } finally {
       setSubmitting(false);
@@ -67,6 +101,7 @@ const Login = ({ hasAdmin, serviceError, onAuthenticate, onForgotPassword, onRes
       const result = await onResendVerification(email.trim().toLowerCase());
       setNotice(result.message);
       setDevLink(result.devLink || "");
+      setDevCode(result.devCode || "");
     } catch (error) {
       setNotice(error.message || "Unable to resend the verification link.");
     } finally {
@@ -92,16 +127,16 @@ const Login = ({ hasAdmin, serviceError, onAuthenticate, onForgotPassword, onRes
         <div className="auth-panel-inner">
           <div className="auth-mobile-brand"><img src={brandLogo} alt="Sam Barbing Hub" /></div>
           <div className="auth-eyebrow"><span className="status-dot" /> STAFF PORTAL</div>
-          <h1>{isForgot ? "Reset your password" : isAdmin ? (creatingAdmin ? "Set up manager access" : "Manager sign in") : (registering ? "Join the team" : "Welcome back")}</h1>
+          <h1>{awaitingVerification ? "Verify your email" : isForgot ? "Reset your password" : isAdmin ? (creatingAdmin ? "Set up manager access" : "Manager sign in") : (registering ? "Join the team" : "Welcome back")}</h1>
           <p className="auth-subtitle">
-            {isForgot ? "Enter your account email and we will send a secure reset link." : isAdmin
+            {awaitingVerification ? "Enter the 8-digit code sent to your email. It expires in 15 minutes." : isForgot ? "Enter your account email and we will send a secure reset link." : isAdmin
               ? creatingAdmin ? "Create the single manager account for this workspace." : "Sign in to manage your barbershop." 
               : registering ? "Create your worker account. Access starts after manager approval." : "Sign in to view your records and track your work."}
           </p>
 
           <form className="auth-form" onSubmit={submit}>
             {serviceError && <p className="auth-notice" role="alert">{serviceError}</p>}
-            {registering && (
+            {registering && !awaitingVerification && (
               <label className="field-label">
                 Full name
                 <span className="input-wrap"><FiUser /><input autoComplete="name" required value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></span>
@@ -109,17 +144,28 @@ const Login = ({ hasAdmin, serviceError, onAuthenticate, onForgotPassword, onRes
             )}
             <label className="field-label">
               Email address
-              <span className="input-wrap"><span className="input-at">@</span><input autoComplete="email" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" /></span>
+              <span className="input-wrap"><span className="input-at">@</span><input autoComplete="email" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" readOnly={awaitingVerification} /></span>
             </label>
-            {!isForgot && <label className="field-label">
+            {awaitingVerification && <>
+              <label className="field-label">Email verification code
+                <span className="input-wrap"><input autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{8}" maxLength="8" required value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 8))} placeholder="8-digit code" /></span>
+              </label>
+              <p className="muted-copy">Enter the code sent to your email. It expires in 15 minutes.</p>
+            </>}
+            {!isForgot && !awaitingVerification && <label className="field-label">
               Password
               <PasswordInput autoComplete={registering ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" />
             </label>}
+            {!isForgot && !registering && <label className="remember-me">
+              <input type="checkbox" checked={rememberMe} onChange={(event) => setRememberMe(event.target.checked)} />
+              <span>Remember me</span>
+            </label>}
             {notice && <p className="auth-notice" role="status">{notice}</p>}
-            {devLink && <a className="dev-action-link" href={devLink}>Open local email link <FiArrowRight /></a>}
-            {canResend && !isForgot && <button className="text-button resend-button" type="button" disabled={submitting} onClick={resendVerification}>Resend verification email</button>}
+            {!isProduction && devLink && <a className="dev-action-link" href={devLink}>Open local mail <FiArrowRight /></a>}
+            {!isProduction && devCode && <p className="auth-notice" role="status">Local verification code: <strong>{devCode}</strong></p>}
+            {canResend && !isForgot && <button className="text-button resend-button" type="button" disabled={submitting} onClick={resendVerification}>Resend verification code</button>}
             <button className="primary-button auth-submit" type="submit" disabled={submitting || Boolean(serviceError)}>
-              {submitting ? "Please wait…" : isForgot ? "Send reset link" : registering ? (isAdmin ? "Create manager account" : "Request access") : "Sign in"}
+              {submitting ? "Please wait…" : awaitingVerification ? "Verify email" : isForgot ? "Send reset link" : registering ? (isAdmin ? "Create manager account" : "Request access") : "Sign in"}
               <FiArrowRight />
             </button>
           </form>
@@ -132,6 +178,13 @@ const Login = ({ hasAdmin, serviceError, onAuthenticate, onForgotPassword, onRes
               </button>
             </p>
           )}
+
+          {creatingAdmin && !awaitingVerification && <p className="auth-switchline">
+            Already have a manager account?
+            <button className="text-button" type="button" onClick={() => { setForceAdminLogin(true); setIsRegister(false); setNotice(""); setDevLink(""); setDevCode(""); }}>
+              Login to admin
+            </button>
+          </p>}
 
           {!isForgot && !registering && <button className="text-button forgot-link" type="button" onClick={() => { setReturnView(view); setView("forgot"); setNotice(""); setDevLink(""); }}>Forgot password?</button>}
 
